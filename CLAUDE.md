@@ -127,46 +127,38 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
 
 ## Known gaps
 
-- **Confirmed working: kill count, value merge, and structural condition merge (two objectives -> one).**
-  **Still genuinely stale: the display text**, specifically and only for Rite of Passage, which was already
-  *accepted* on this profile before the mod was ever installed. The user's first "looks merged and updated"
-  read turned out to be a quick glance that only registered the two objectives becoming one — a closer look
-  afterward showed the surviving objective still reads "Eliminate Scavs at the new gas station on Customs," the
-  exact original text, not the patched "Eliminate Scavs on Customs." This is **not** a key-mismatch bug — the
-  diagnostic log's own "before" value for this exact condition ID
-  (`675c1f17cf59d5433be7ae77`) is character-for-character the same string the user sees, confirming we're
-  reading/writing the one real key correctly; the server has proven correct twice now.
+- **The core mechanic is fully confirmed working, in a real raid, 2026-08-27**: a Scav kill well away from the
+  old gas station zone correctly incremented progress on Rite of Passage's (already-merged) objective, and the
+  combined count/merge held up correctly through the raid. This was the actual point of the mod — bots not
+  reliably pathing into the old zone-restricted trigger no longer matters, kills anywhere on the map count. No
+  open question left on the mechanic itself.
+- **Display text remains genuinely stale for Rite of Passage specifically — the raid-fetch-timing theory is
+  ruled out.** Text read identically in the main menu, in-raid, and after returning from the raid — if the
+  unconditional raid-load locale re-fetch (`DataPrepareOperation.Run` → `session.GetLocalization`) were the
+  fix, it would have shown correct text at least once across those three checks, and it didn't. That specific
+  client fetch-path asymmetry (documented in git history, see the commit that found it) is a real thing but not
+  the explanation for this symptom.
 
   **Ruled out**: the player profile save (`user\profiles\<id>.json`) — checked directly. It stores only
   `{id, type, value, sourceId}` per `TaskConditionCounters` entry and `{qid, status, statusTimers,
-  completedConditions}` per quest — zero text of any kind. Not the source of the staleness.
+  completedConditions}` per quest — zero text of any kind.
+  **Ruled out**: raid-load locale re-fetch timing (see above) — text was checked before, during, and after a
+  raid load this session and never changed.
+  **Confirmed correct twice over, not the problem**: the server-side write itself — proven via diagnostic
+  logging showing the exact right before/after text on every restart.
 
-  **Found, not yet confirmed as the actual cause**: the client (`Assembly-CSharp`, `DataPrepareOperation.cs`)
-  has two separate locale-fetch paths that both merge into the same underlying dictionary
-  (`LocalizationManager._locales`, via the same `UpdateLocale` method — so this isn't two separate stores, and
-  server data always wins on overwrite either way), but with different refresh timing:
-  - `LoadMainMenuLocale` (called around login) fetches via `GetMainMenuLocalization`, guarded by
-    `!ContainsMainMenuCulture(locale)` — **explicitly skipped on every call after the first, for the rest of
-    that client process's lifetime**, regardless of how many times the quest screen is viewed afterward.
-  - `ReloadLocale` → `DataPrepareOperation.Run`, called specifically when **loading into a raid** (bundled with
-    weather/time/level-settings) — calls `session.GetLocalization(locale)` **unconditionally, no cache guard**,
-    every single raid load.
-  So checking the quest screen from the main menu, before entering a raid that session, may show whatever was
-  cached at initial login; entering a raid forces a full unconditional re-fetch that can't be stale the same
-  way. **Still not certain this is the actual mechanism at play here** — it's a real, confirmed asymmetry in the
-  client's own fetch logic, not a guess, but hasn't been directly tied to this specific symptom by observation
-  yet. Next check: whether the quest text reads correctly once viewed after a raid load this session (the user
-  was already heading into one to separately test in-raid kill counting, so this may resolve itself as a
-  byproduct of that test). If it's still stale even after a raid load, this theory is wrong and the "pinned for
-  already-accepted quests" theory (a **not-yet-accepted** quest among the other 30 conditions showing correct
-  text immediately would confirm that instead) is the next one to chase.
-  Structural note this test *did* settle: removing a `QuestCondition` outright from an already-accepted quest's
-  list caused no observed desync — the merge itself (going from two objectives to one, combined count) rendered
-  and behaved correctly, it's specifically the string display that's stuck.
-- **Still not verified**: whether an actual in-raid kill on one of these now-derestricted objectives (e.g. a
-  Scav killed anywhere on Customs, not at the old/new gas station specifically) correctly increments progress.
-  Data-level correctness (values, text, structure) is now fully confirmed; the live counting behavior during a
-  raid is the one remaining thing that needs an actual raid to test.
+  **Remaining theory, not yet tested**: text is pinned specifically for quests *already accepted* before this
+  mod changed them, and won't self-correct for this profile's copy of Rite of Passage no matter what's done
+  client-side afterward. The decisive test: check a **not-yet-accepted** quest among the other 30 affected
+  conditions (e.g. Pest Control, Safe Corridor, Illegal Logging, Preemptive Strike — whichever this profile
+  hasn't started) — if a freshly-accepted one shows the corrected text immediately, that confirms it, and the
+  practical takeaway is this mod's text fix reliably applies going forward but not retroactively to
+  already-in-progress saves — a cosmetic-only limitation at that point, since the mechanic itself (the part
+  that actually matters) already works regardless.
+  Also confirmed by this same test: removing a `QuestCondition` outright from an already-accepted quest's list
+  caused no observed desync — the merge (two objectives -> one, combined count, progress tracked correctly
+  through a raid) behaved correctly end to end. It's specifically the string display that's stuck, nothing
+  structural.
 - **Whether `OnLoadOrder.PostLoad + 1` runs early enough relative to whatever else touches quest data** — the
   official example uses the same priority for exactly this kind of raw-DB edit, a strong precedent, and every
   observed result so far (correct values, correct text, correct merge) is consistent with it running at the
