@@ -62,17 +62,20 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   3. `condition.Value = Math.Ceiling(condition.Value * multiplier)` — scales the required kill count.
      `Math.Ceiling`, not rounding or truncating, so the multiplier never has *less* effect than configured for
      odd source values (e.g. 5 × 1.5 = 7.5 → 8, not 7).
-  4. `localeService.GetLocaleDb("en")[conditionId] = newText` — overwrites the condition's own display string.
-     **Confirmed necessary, not assumed**: `dynamicLocale: false` on every one of these conditions, and each has
-     a fully pre-written, fixed locale string keyed by its own condition ID (e.g. `"Eliminate Scavs at the old
-     gas station on Customs"`) — the client does not compose this text from the condition's structured fields,
-     so leaving it alone after changing the JSON would show stale/wrong text. **`LocaleService.GetLocaleDb`
-     is used deliberately instead of touching `LocaleTable.Global` directly** — that property's own doc comment
-     warns it's lazy-loaded and changes made directly to it won't persist; `GetLocaleDb` triggers the lazy load
-     and returns the real backing dictionary. English-only: other languages will show the original, now
-     slightly stale but still perfectly understandable text (still says the right creature and map, just also
-     mentions a zone that no longer matters) — not attempted, to avoid shipping bad machine-translated strings
-     for a case with only one real, verified source language.
+  4. Registers a **transformer** on `localeTable.Global["en"]` (a `LazyLoad<GlobalLocaleDictionary>`) that
+     overwrites `conditionId → newText` on every fresh deserialize — see "Known gaps" below for why this,
+     rather than writing into `LocaleService.GetLocaleDb()`'s returned dictionary directly, is required:
+     `LazyLoad<T>.Value` re-deserializes from scratch on every access with no memoization, so a direct write
+     is silently discarded before the next locale fetch ever sees it. `AddTransformer` is the real,
+     server-sanctioned persistence path (same one `CustomQuestService.AddQuestLocales` uses).
+     **Confirmed necessary to patch text at all, not assumed**: `dynamicLocale: false` on every one of these
+     conditions, and each has a fully pre-written, fixed locale string keyed by its own condition ID (e.g.
+     `"Eliminate Scavs at the old gas station on Customs"`) — the client does not compose this text from the
+     condition's structured fields, so leaving it alone after changing the JSON would show stale/wrong text.
+     English-only: other languages will show the original, now slightly stale but still perfectly
+     understandable text (still says the right creature and map, just also mentions a zone that no longer
+     matters) — not attempted, to avoid shipping bad machine-translated strings for a case with only one real,
+     verified source language.
   - Logs a warning (not a hard failure) for any entry whose condition ID isn't found, or whose `InZone`
     sub-condition is already gone — both would mean a game/SPT update changed the underlying data and this mod
     needs re-checking, not that the mod should crash the server.
@@ -132,52 +135,36 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   combined count/merge held up correctly through the raid. This was the actual point of the mod — bots not
   reliably pathing into the old zone-restricted trigger no longer matters, kills anywhere on the map count. No
   open question left on the mechanic itself.
-- **Display text remains genuinely stale for Rite of Passage specifically — the raid-fetch-timing theory is
-  ruled out.** Text read identically in the main menu, in-raid, and after returning from the raid — if the
-  unconditional raid-load locale re-fetch (`DataPrepareOperation.Run` → `session.GetLocalization`) were the
-  fix, it would have shown correct text at least once across those three checks, and it didn't. That specific
-  client fetch-path asymmetry (documented in git history, see the commit that found it) is a real thing but not
-  the explanation for this symptom.
-
-  **Ruled out**: the player profile save (`user\profiles\<id>.json`) — checked directly. It stores only
-  `{id, type, value, sourceId}` per `TaskConditionCounters` entry and `{qid, status, statusTimers,
-  completedConditions}` per quest — zero text of any kind.
-  **Ruled out**: raid-load locale re-fetch timing (see above) — text was checked before, during, and after a
-  raid load this session and never changed.
-  **Confirmed correct twice over, not the problem**: the server-side write itself — proven via diagnostic
-  logging showing the exact right before/after text on every restart.
-
-  **"Pinned for already-accepted quests" theory retracted — it had no real mechanism behind it, it was just
-  the last theory standing after ruling out the other three by elimination.** The user correctly challenged
-  this on 2026-08-26 ("surely its just grabbing everything to do with a quest through an ID, I wouldnt have
-  thought it would persist the data of the quest based on whether its been accepted") and was right to. Traced
-  it properly through the decompiled client (`C:\Dev\spt-reference\client-dlls\decompiled`) instead:
-  - `dynamicLocale: false` on this condition (confirmed against live `quests.json`) means
-    `EFT.Quests.ConditionCounterCreator.FormattedDescription` resolves via `base.FormattedDescription`, which
-    is `id.ToString().Localized()` → `LocalizationManager.Instance.LocalizedValue(id)` — a live dictionary
-    lookup against `_locales["en"]`, recomputed fresh on every call. **Nothing caches the resolved string on
-    the condition object itself, and `Locale.Merge()` unconditionally overwrites on key collision** (not
-    "fill gaps only") — so the data layer is provably correct and accept-status-blind end to end.
-  - **The real remaining lead**: the quest task-journal UI (`EFT.UI.QuestObjectiveView` /
-    `ObjectiveView<T>`) only re-reads `FormattedDescription` and writes it into the on-screen text field
-    inside `ShowObjective()` — called when that panel is *(re)created*. If the Tasks-screen UI element for an
-    already-open/already-seen quest is pooled (hidden/shown, not destroyed/rebuilt) across raids, you'd see
-    exactly this symptom: correct data everywhere, stale pixels because nothing re-triggered the render call.
-  - **Not yet actually tested**: a full game **client** close-and-relaunch (not just a server restart, and not
-    just returning to the main menu) before reopening Tasks. Every check so far (menu → raid → menu, and a
-    full **server** restart for the 2026-08-26 QuestKeyInfo cross-check below) kept the same client process
-    running the whole time, so this specific theory hasn't been ruled out yet.
-  - **Cross-mod confirmation the symptom is general, not NoMoreKillZones-specific**: QuestKeyInfo (sibling
-    mod, `C:\Dev\QuestKeyInfo`) writes to a completely different locale key (`"<questId> description"`, not a
-    condition ID) via the exact same `LocaleService.GetLocaleDb` mechanism. After a full **server** restart,
-    the user's already-accepted "Golden Swag" quest (server-side data confirmed correct — both required keys
-    present in `quest-keys.json`) still didn't show the appended text. Same symptom, different mod, different
-    locale key, different code path into the same client — strong evidence this is a general "already-open
-    quest doesn't re-render" client behavior, not something specific to this mod's condition-merge logic.
-  Also separately confirmed earlier: removing a `QuestCondition` outright from an already-accepted quest's list
-  caused no observed desync — the merge (two objectives -> one, combined count, progress tracked correctly
-  through a raid) behaved correctly end to end. It's specifically the string display that's stuck, nothing
-  structural.
+- **RESOLVED, 2026-08-26 — root cause found and fixed.** Display text was stale for every affected quest
+  (confirmed on a **brand new profile**, not just already-accepted ones — killed the last surviving "pinned for
+  accepted quests" theory outright, which the user correctly challenged as mechanistically implausible before
+  it was ever actually verified). The real cause has nothing to do with accept-status, client caching, UI
+  pooling, or raid-load timing — all four of those were investigated and eventually ruled out (see git history
+  for the paper trail) before finding the actual bug, which was **server-side and much simpler**:
+  - `LocaleTable.Global` is `Dictionary<string, LazyLoad<GlobalLocaleDictionary>>`
+    (`SPTarkov.Server.Core\Models\Spt\Tables\LocaleTable.cs`) — its own doc comment warns "changes will not be
+    saved," and reading `LazyLoad<T>.Value`'s getter
+    (`SPTarkov.Server.Core\Utils\Json\LazyLoad.cs`) confirms exactly why: it calls `deserialize()` **fresh,
+    from scratch, on every single access** — there is no memoization of the result at all.
+    `LocaleService.GetLocaleDb()` just returns that brand-new, throwaway dictionary. Writing into it directly
+    (the original approach used here) mutated an object that was discarded the instant `OnLoadAsync` returned —
+    the very next locale fetch (client login, `/client/locale/en`, anything) got a completely fresh dictionary
+    with none of this mod's edits, regardless of whether the quest had ever been seen before.
+  - The actual sanctioned persistence mechanism is `LazyLoad<T>.AddTransformer(Func<T?, T?>)` — registers a
+    function that re-runs against every fresh deserialize, so it survives no matter how many times the
+    dictionary gets rebuilt. This isn't a workaround invented here — it's the exact pattern the server's own
+    `Services\Modding\Custom\CustomQuestService.AddQuestLocales` uses for the same purpose (confirmed by
+    reading that source directly), just never applied to this mod's writes until now.
+  - **Fix applied**: `NoMoreKillZonesHook` now injects `LocaleTable` (not `LocaleService`), builds a
+    `Dictionary<string, string>` of all condition-ID → replacement-text overrides (main pass + merge pass, same
+    precedence as before — merges still win), then registers **one** transformer on
+    `localeTable.Global["en"]` that applies every override on each fresh deserialize. Builds clean, deployed to
+    the live server; the user's earlier test methodology (full client+server restart, and a brand-new profile)
+    is exactly what will confirm this actually fixes it in the next in-game check.
+  - **Cross-mod confirmation this was general, not specific to this mod's merge logic**: sibling mod
+    QuestKeyInfo (`C:\Dev\QuestKeyInfo`) hit the identical symptom writing to a completely different locale key
+    (`"<questId> description"`, not a condition ID) via the same broken `GetLocaleDb()`-direct-write pattern —
+    and got the same fix (`LocaleTable.AddTransformer`) applied at the same time.
 - **Whether `OnLoadOrder.PostLoad + 1` runs early enough relative to whatever else touches quest data** — the
   official example uses the same priority for exactly this kind of raw-DB edit, a strong precedent, and every
   observed result so far (correct values, correct text, correct merge) is consistent with it running at the

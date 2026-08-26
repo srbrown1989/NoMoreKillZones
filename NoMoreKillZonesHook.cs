@@ -8,7 +8,6 @@ using SPTarkov.Server.Core.Helpers.Server;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Tables;
-using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Utils;
 
 namespace NoMoreKillZones;
@@ -73,7 +72,7 @@ public record QuestMergeEntry
 [Injectable(TypePriority = OnLoadOrder.PostLoad + 1)]
 public class NoMoreKillZonesHook(
     TemplateTable templateTable,
-    LocaleService localeService,
+    LocaleTable localeTable,
     ModHelper modHelper,
     FileUtil fileUtil,
     JsonUtil jsonUtil,
@@ -87,7 +86,15 @@ public class NoMoreKillZonesHook(
         var entries = LoadZoneQuestEntries(modFolder);
         var merges = LoadQuestMerges(modFolder);
 
-        var localeDb = localeService.GetLocaleDb("en");
+        // LocaleTable.Global[lang] is a LazyLoad<GlobalLocaleDictionary> that re-deserializes from
+        // scratch on every single .Value access (confirmed by reading LazyLoad.cs - no memoization of
+        // the deserialized result at all) - LocaleService.GetLocaleDb() just returns that fresh,
+        // throwaway dictionary, so writing into it directly (the original approach here) was silently
+        // discarded the instant this method returned; the very next locale fetch got an unmodified
+        // dictionary. AddTransformer registers a function that re-runs against every fresh deserialize,
+        // which is the actual persistence mechanism - same pattern the server's own
+        // CustomQuestService.AddQuestLocales uses for exactly this purpose.
+        var textOverrides = new Dictionary<string, string>();
         var appliedCount = 0;
 
         foreach (var entry in entries)
@@ -112,17 +119,7 @@ public class NoMoreKillZonesHook(
                 condition.Value = Math.Ceiling(condition.Value.Value * config.KillCountMultiplier);
             }
 
-            // Diagnostic: the in-game text for Rite of Passage was reported as still showing the old
-            // zone-specific wording after this ran (kill count DID update correctly). The server-side
-            // write below and the /client/locale/{lang} route both check out against the real source
-            // (confirmed by reading it, not assumed), so this logs exactly what we read/wrote here to
-            // pin down whether the write itself is the problem or something downstream (most likely
-            // client-side locale caching) is.
-            localeDb.TryGetValue(entry.ConditionId, out var previousText);
-            localeDb[entry.ConditionId] = entry.NewText;
-            logger.Info(
-                $"NoMoreKillZones: locale[{entry.ConditionId}] \"{previousText}\" -> \"{entry.NewText}\"");
-
+            textOverrides[entry.ConditionId] = entry.NewText;
             appliedCount++;
         }
 
@@ -145,13 +142,35 @@ public class NoMoreKillZonesHook(
                     $"NoMoreKillZones: merge for {merge.Quest} - couldn't remove condition {merge.RemoveConditionId} from its quest's condition list (already gone?).");
             }
 
-            localeDb[merge.KeepConditionId] = merge.NewText;
-            logger.Info(
-                $"NoMoreKillZones: merged {merge.RemoveConditionId} into {merge.KeepConditionId} ({merge.Quest}) - combined value {keep.Value}, text -> \"{merge.NewText}\"");
+            // Overwrites whatever the main pass above set for this condition ID (keepConditionId is
+            // always also a zone-quests.json entry today), matching the original precedence.
+            textOverrides[merge.KeepConditionId] = merge.NewText;
+        }
+
+        if (localeTable.Global.TryGetValue("en", out var lazyLocale))
+        {
+            lazyLocale.AddTransformer(localeData =>
+            {
+                if (localeData is null)
+                {
+                    return null;
+                }
+
+                foreach (var (id, text) in textOverrides)
+                {
+                    localeData[id] = text;
+                }
+
+                return localeData;
+            });
+        }
+        else
+        {
+            logger.Warning("NoMoreKillZones: no 'en' locale found in LocaleTable.Global - text changes will not apply.");
         }
 
         logger.Info(
-            $"NoMoreKillZones: derestricted {appliedCount}/{entries.Count} zone-locked kill objectives (kill count x{config.KillCountMultiplier}), merged {merges.Count} same-map duplicate pair(s).");
+            $"NoMoreKillZones: derestricted {appliedCount}/{entries.Count} zone-locked kill objectives (kill count x{config.KillCountMultiplier}), merged {merges.Count} same-map duplicate pair(s), registered {textOverrides.Count} locale text override(s).");
 
         return Task.CompletedTask;
     }
