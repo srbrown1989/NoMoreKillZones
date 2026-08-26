@@ -127,34 +127,23 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
 
 ## Known gaps
 
-- **Server-side write confirmed 100% correct, 2026-08-27 — the remaining "text not showing" mystery, if it's
-  still a mystery, is entirely client-side.** First test: kill count updated (10→15) but Rite of Passage's quest
-  screen still showed the original zone-specific text. Added before/after diagnostic logging to settle whether
-  the write was actually happening; a subsequent server restart's console log showed **all 31/31 locale writes
-  succeeding with exactly the right before/after text**, e.g.
-  `locale[675c1f040a1128e59422a876] "Eliminate Scavs at the old gas station on Customs" -> "Eliminate Scavs on
-  Customs"`, and the merge pass also logged correctly (`merged ... combined value 30, text -> "Eliminate Scavs
-  on Customs"`). This rules out the server side entirely — `/client/locale/{lang}` and the locale dictionary
-  itself are provably not the problem. If the client still shows stale text after this, the cause is somewhere
-  client-side (possibly scoped to *already-accepted* quests specifically, since Rite of Passage was active
-  before this mod was installed — worth comparing against a *newly*-accepted copy of one of the other 30
-  affected quests if the symptom recurs). **Awaiting the user's next in-game check** to know whether this is
-  actually resolved now or genuinely needs a client-side investigation.
-- **Two same-map duplicate conditions merged into one**: the same test surfaced that Rite of Passage's two
-  Customs conditions (old/new gas station) read awkwardly as two separate "Eliminate Scavs on Customs" lines
-  once both lost their zone-specific wording — the user asked for them to combine into a single "Eliminate
-  Scavs on Customs, 0/30" objective instead. New `config/quest-merges.json` + a merge pass in the hook (runs
-  after the main derestrict pass, sums the two already-scaled values, deletes one condition entirely, overwrites
-  the survivor's text) handles this. Checked the other 19 quests for the same same-map-duplicate pattern before
-  assuming Rite of Passage was a one-off — it's the *only* one among the 31 tracked conditions with two
-  conditions on the same map, so this is a single hand-written entry, not a feature that needed to handle many
-  cases. **Entirely unverified in-game** — whether removing a `QuestCondition` object outright from an
-  already-accepted quest's list causes any client-side desync (stale progress reference, UI glitch) for a
-  profile that already had both original conditions is a real open risk, not just a formality, precisely
-  because this profile already has Rite of Passage active from before this change.
+- **Confirmed fully working in-game, 2026-08-27: both the text patch and the merge.** First test showed the
+  kill count updating (10→15) but stale text; diagnostic logging then proved the server-side write was 100%
+  correct on every restart (all 31/31 locale writes, exact expected before/after text, merge pass logged
+  correctly too). On the very next in-game check, both the corrected text *and* the merged single "Eliminate
+  Scavs on Customs" objective (combined value 30) showed up correctly for Rite of Passage — whatever caused the
+  one stale read was transient/session-specific, not a real bug in this mod. No open question left here.
+  Also answers the earlier open risk directly: removing a `QuestCondition` outright from an *already-accepted*
+  quest's list (Rite of Passage was active on this profile before the mod was installed) did **not** cause any
+  observed desync — the merge rendered cleanly.
+- **Still not verified**: whether an actual in-raid kill on one of these now-derestricted objectives (e.g. a
+  Scav killed anywhere on Customs, not at the old/new gas station specifically) correctly increments progress.
+  Data-level correctness (values, text, structure) is now fully confirmed; the live counting behavior during a
+  raid is the one remaining thing that needs an actual raid to test.
 - **Whether `OnLoadOrder.PostLoad + 1` runs early enough relative to whatever else touches quest data** — the
-  official example uses the same priority for exactly this kind of raw-DB edit, a strong precedent, but still
-  not directly confirmed by observation for this specific case.
+  official example uses the same priority for exactly this kind of raw-DB edit, a strong precedent, and every
+  observed result so far (correct values, correct text, correct merge) is consistent with it running at the
+  right time, but this still hasn't been separately/directly isolated as a variable.
 - **Only the English locale is patched.** Any other configured server/game language will keep showing the
   original zone-specific text (harmless — still names the right target and map, just also mentions a
   now-irrelevant zone) until someone verifies and adds correct translations for the other 15+ languages this
