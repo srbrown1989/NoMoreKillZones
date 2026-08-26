@@ -127,15 +127,25 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
 
 ## Known gaps
 
-- **Confirmed fully working in-game, 2026-08-27: both the text patch and the merge.** First test showed the
-  kill count updating (10→15) but stale text; diagnostic logging then proved the server-side write was 100%
-  correct on every restart (all 31/31 locale writes, exact expected before/after text, merge pass logged
-  correctly too). On the very next in-game check, both the corrected text *and* the merged single "Eliminate
-  Scavs on Customs" objective (combined value 30) showed up correctly for Rite of Passage — whatever caused the
-  one stale read was transient/session-specific, not a real bug in this mod. No open question left here.
-  Also answers the earlier open risk directly: removing a `QuestCondition` outright from an *already-accepted*
-  quest's list (Rite of Passage was active on this profile before the mod was installed) did **not** cause any
-  observed desync — the merge rendered cleanly.
+- **Confirmed working: kill count, value merge, and structural condition merge (two objectives -> one).**
+  **Still genuinely stale: the display text**, specifically and only for Rite of Passage, which was already
+  *accepted* on this profile before the mod was ever installed. The user's first "looks merged and updated"
+  read turned out to be a quick glance that only registered the two objectives becoming one — a closer look
+  afterward showed the surviving objective still reads "Eliminate Scavs at the new gas station on Customs," the
+  exact original text, not the patched "Eliminate Scavs on Customs." This is **not** a key-mismatch bug — the
+  diagnostic log's own "before" value for this exact condition ID
+  (`675c1f17cf59d5433be7ae77`) is character-for-character the same string the user sees, confirming we're
+  reading/writing the one real key correctly; the server has proven correct twice now. The leading theory,
+  raised by the user themselves and not yet ruled out or confirmed: **text may be pinned/cached specifically
+  for quests already accepted before the mod changed them**, rather than a generic client cache. The decisive
+  test, not yet run: check a **not-yet-accepted** quest among the other 30 affected conditions (e.g. Pest
+  Control, Safe Corridor, Illegal Logging — whichever this profile hasn't started) — if a fresh quest shows the
+  corrected text immediately while Rite of Passage doesn't, that confirms the theory, and the practical
+  implication is this mod's text fix only reliably applies going forward to quests not yet in progress, not
+  retroactively to ones already active on an existing save.
+  Structural note this test *did* settle: removing a `QuestCondition` outright from an already-accepted quest's
+  list caused no observed desync — the merge itself (going from two objectives to one, combined count) rendered
+  and behaved correctly, it's specifically the string display that's stuck.
 - **Still not verified**: whether an actual in-raid kill on one of these now-derestricted objectives (e.g. a
   Scav killed anywhere on Customs, not at the old/new gas station specifically) correctly increments progress.
   Data-level correctness (values, text, structure) is now fully confirmed; the live counting behavior during a
