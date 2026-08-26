@@ -135,14 +135,31 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   exact original text, not the patched "Eliminate Scavs on Customs." This is **not** a key-mismatch bug — the
   diagnostic log's own "before" value for this exact condition ID
   (`675c1f17cf59d5433be7ae77`) is character-for-character the same string the user sees, confirming we're
-  reading/writing the one real key correctly; the server has proven correct twice now. The leading theory,
-  raised by the user themselves and not yet ruled out or confirmed: **text may be pinned/cached specifically
-  for quests already accepted before the mod changed them**, rather than a generic client cache. The decisive
-  test, not yet run: check a **not-yet-accepted** quest among the other 30 affected conditions (e.g. Pest
-  Control, Safe Corridor, Illegal Logging — whichever this profile hasn't started) — if a fresh quest shows the
-  corrected text immediately while Rite of Passage doesn't, that confirms the theory, and the practical
-  implication is this mod's text fix only reliably applies going forward to quests not yet in progress, not
-  retroactively to ones already active on an existing save.
+  reading/writing the one real key correctly; the server has proven correct twice now.
+
+  **Ruled out**: the player profile save (`user\profiles\<id>.json`) — checked directly. It stores only
+  `{id, type, value, sourceId}` per `TaskConditionCounters` entry and `{qid, status, statusTimers,
+  completedConditions}` per quest — zero text of any kind. Not the source of the staleness.
+
+  **Found, not yet confirmed as the actual cause**: the client (`Assembly-CSharp`, `DataPrepareOperation.cs`)
+  has two separate locale-fetch paths that both merge into the same underlying dictionary
+  (`LocalizationManager._locales`, via the same `UpdateLocale` method — so this isn't two separate stores, and
+  server data always wins on overwrite either way), but with different refresh timing:
+  - `LoadMainMenuLocale` (called around login) fetches via `GetMainMenuLocalization`, guarded by
+    `!ContainsMainMenuCulture(locale)` — **explicitly skipped on every call after the first, for the rest of
+    that client process's lifetime**, regardless of how many times the quest screen is viewed afterward.
+  - `ReloadLocale` → `DataPrepareOperation.Run`, called specifically when **loading into a raid** (bundled with
+    weather/time/level-settings) — calls `session.GetLocalization(locale)` **unconditionally, no cache guard**,
+    every single raid load.
+  So checking the quest screen from the main menu, before entering a raid that session, may show whatever was
+  cached at initial login; entering a raid forces a full unconditional re-fetch that can't be stale the same
+  way. **Still not certain this is the actual mechanism at play here** — it's a real, confirmed asymmetry in the
+  client's own fetch logic, not a guess, but hasn't been directly tied to this specific symptom by observation
+  yet. Next check: whether the quest text reads correctly once viewed after a raid load this session (the user
+  was already heading into one to separately test in-raid kill counting, so this may resolve itself as a
+  byproduct of that test). If it's still stale even after a raid load, this theory is wrong and the "pinned for
+  already-accepted quests" theory (a **not-yet-accepted** quest among the other 30 conditions showing correct
+  text immediately would confirm that instead) is the next one to chase.
   Structural note this test *did* settle: removing a `QuestCondition` outright from an already-accepted quest's
   list caused no observed desync — the merge itself (going from two objectives to one, combined count) rendered
   and behaved correctly, it's specifically the string display that's stuck.
