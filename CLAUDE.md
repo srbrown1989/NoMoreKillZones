@@ -85,7 +85,13 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   back to this default rather than failing mod load, same defensive pattern as SkillPointsMod's own config
   loading (reused directly — `ModHelper.GetAbsolutePathToModFolder` + `FileUtil` + `JsonUtil`).
 - **`config/zone-quests.json`** — the 31-entry table: `{ quest (human label, for logging only), conditionId,
-  newText }`. **Hand-curated, not templated/auto-generated** — deliberately, given the lesson from a sibling
+  newText, mapTargets }`. `mapTargets` is a list of BSG's internal short map keys (e.g. `"bigmap"` = Customs,
+  `"RezervBase"` = Reserve, `"TarkovStreets"` = Streets of Tarkov, `"factory4_day"`/`"factory4_night"` = Factory
+  — both listed for the two Factory quests, so a kill counts regardless of which day/night variant matchmaking
+  rolls) — added as a fresh `Location`-type sub-condition once `InZone` is removed, which is what actually keeps
+  the objective scoped to one map (see "Known gaps" — the quest's own top-level `location` field does **not**
+  do this). Empty list = deliberately no map restriction (`Preemptive Strike` only). **Hand-curated, not
+  templated/auto-generated** — deliberately, given the lesson from a sibling
   project's key-name generation bug earlier: with only 31 entries and real varied English sentence structure to
   preserve (weapon/time/other qualifiers that must survive the zone removal), a generic "strip everything after
   the last preposition" transform would have been both fragile and lower-quality than just doing it by hand
@@ -101,15 +107,11 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
     - `newText` reuses BSG's own established phrasing pattern for this exact scenario — `"Eliminate {who} on
       {Map}"` — rather than inventing new wording, found via a real vanilla precedent quest ("The Huntsman Path
       - Outcasts") that already has a plain map-only elimination objective with no zone restriction at all.
-      That same quest is also what confirmed map-scoping survives removing only the `InZone` sub-condition: it
-      proves a `Kills`-only condition (no `InZone`, no separate `Location` sub-condition) is already correctly
-      scoped to one map purely via the *quest's own* top-level `location` field — so deleting `InZone` here
-      doesn't risk accidentally making the objective count on any map, only removes the finer zone restriction,
-      exactly matching the user's explicit clarification ("needs to remove the specific zone within a map, but
-      does need to be the same map").
-    - "Preemptive Strike" is the one exception without a map in its `newText` — its quest's own `location` field
-      is `"any"` (not a specific map), so post-fix the objective is genuinely "kill Scavs anywhere," matching
-      what removing a zone restriction under an already-any-map quest naturally means.
+    - "Preemptive Strike" is the one entry with no map in its `newText` and an empty `mapTargets` — its quest's
+      own `location` field is `"any"`, and the user confirmed it should stay genuinely map-unrestricted.
+    - **`mapTargets` (see below) is what actually keeps each objective scoped to one map — the quest's own
+      top-level `location` field does NOT do this, despite an earlier (wrong) theory that it did. See "Known
+      gaps" / the 2026-08-27 entry for the full story: it took a real cross-map completion in-game to catch.
 
 ## Design decisions (confirmed with the user, not guessed)
 
@@ -129,6 +131,35 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   hardcoded per-condition locale strings) before writing any code, not assumed either way.
 
 ## Known gaps
+
+- **RESOLVED, 2026-08-27 — real cross-map completion bug, root cause was a wrong theory used since this mod's
+  design phase.** User completed "Provide Viewership" (meant to be Customs-only) with a kill on Ground Zero.
+  Investigated properly instead of guessing:
+  - Confirmed via the live `quests.json` that Provide Viewership's own `location` field genuinely **is**
+    Customs (`bigmap`) - not "any", so the original theory ("a `Kills`-only condition is already correctly
+    scoped via the quest's own top-level `location` field, confirmed by 'The Huntsman Path - Outcasts' having
+    the same no-InZone structure") should have held if it were true. It didn't - proving the theory itself was
+    wrong all along, not just misapplied to this one quest. The "Outcasts" precedent was never actually a
+    working proof; it just happened not to have been noticed as broken, because nobody had tested killing on
+    the wrong map for it either.
+  - Found the real mechanism: BSG has a genuine `Location`-type sub-condition (`{conditionType: "Location",
+    target: ["Woods"]}` etc, confirmed via a real example elsewhere in the live quest database), completely
+    separate from the quest's own `location` field, which is apparently **not enforced server-side for kill
+    counting at all** - it's most likely just metadata (quest-list filtering/map icon), not a gameplay
+    restriction. Also found several of this mod's own affected quests have `location: "any"` despite being
+    obviously single-map quests (Capturing Outposts x3, Return the Favor, Illegal Logging x4, Provide
+    Viewership) - meaning those were **always** at risk of cross-map completion the moment `InZone` was
+    removed, this just hadn't been noticed yet.
+  - **Fix**: `zone-quests.json` gained a `mapTargets` field per entry (the correct BSG internal map key(s),
+    resolved from each quest's real `location` field where that's a genuine map ID, or inferred from the
+    already-verified `newText` where `location` is `"any"`/`"marathon"`). `NoMoreKillZonesHook` now adds a
+    fresh `Location`-type `QuestConditionCounterCondition` in place of the removed `InZone` one, for every entry
+    except `Preemptive Strike` (deliberately left map-unrestricted, unchanged). This is the actual fix for the
+    "needs to remove the specific zone within a map, but does need to be the same map" requirement from this
+    mod's original design - it was never really satisfied until now.
+  - Not yet re-confirmed in-game after this fix (built clean, deployed) - the next real test is exactly the
+    scenario that surfaced the bug: complete an affected quest's kill count on a *different* map than intended
+    and confirm it no longer counts.
 
 - **The core mechanic is fully confirmed working, in a real raid, 2026-08-27**: a Scav kill well away from the
   old gas station zone correctly incremented progress on Rite of Passage's (already-merged) objective, and the

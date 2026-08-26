@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Reflection;
 using System.Text.Json.Serialization;
 using IOPath = System.IO.Path;
@@ -5,10 +6,12 @@ using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers.Server;
+using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Utils;
+using SPTarkov.Server.Core.Utils.Json;
 
 namespace NoMoreKillZones;
 
@@ -26,6 +29,14 @@ public record NoMoreKillZonesFileConfig
 // numeric Value, confirmed against several vanilla map-only-restricted quests
 // that already follow this exact "Eliminate {who} on {Map}" pattern with no
 // count in the string).
+//
+// mapTargets: the internal short map key(s) (e.g. "bigmap" = Customs, "Woods",
+// "RezervBase" = Reserve - the exact strings BSG's own real "Location"-type
+// sub-condition uses, confirmed by finding a genuine precedent elsewhere in the
+// live quest database, not guessed) to add as a fresh Location sub-condition once
+// InZone is removed. Empty list = deliberately no map restriction added
+// (Preemptive Strike only - its own quest.location is "any" and the user
+// confirmed it should stay map-unrestricted).
 public record ZoneQuestEntry
 {
     [JsonPropertyName("quest")]
@@ -36,6 +47,9 @@ public record ZoneQuestEntry
 
     [JsonPropertyName("newText")]
     public required string NewText { get; init; }
+
+    [JsonPropertyName("mapTargets")]
+    public List<string>? MapTargets { get; init; }
 }
 
 // One row of config/quest-merges.json - two zone-quests.json entries on the same
@@ -64,6 +78,18 @@ public record QuestMergeEntry
 /// Passage's "kill Scavs at the old gas station on Customs") to "kill anywhere on the same map" -
 /// bot AI often doesn't reliably path into these small trigger zones in single-player, effectively
 /// forcing the objective to be skipped. Compensates by scaling the required kill count up.
+///
+/// IMPORTANT (found 2026-08-26 via a real cross-map completion in-game - Provide Viewership, a
+/// Customs-only quest, completed off a Ground Zero kill): removing only the InZone sub-condition is
+/// NOT enough to keep a Kills condition scoped to one map. The quest's own top-level `location`
+/// field is NOT enforced server-side for kill counting - confirmed both by this real bug and by
+/// several affected quests having `location: "any"` despite being clearly single-map quests. The
+/// only real, server-enforced single-map restriction is a `Location`-type sub-condition (confirmed
+/// via a genuine vanilla precedent elsewhere in the live quest database, `target: ["Woods"]` etc,
+/// using BSG's own internal short map keys, e.g. "bigmap" = Customs, "RezervBase" = Reserve,
+/// "TarkovStreets" = Streets of Tarkov, "factory4_day"/"factory4_night" = Factory). This mod now
+/// adds one of these in place of InZone (config/zone-quests.json's `mapTargets`) for every affected
+/// quest except Preemptive Strike, which is deliberately meant to stay map-unrestricted.
 ///
 /// Runs once, in memory, at server startup (OnLoadOrder.PostLoad + 1 - straight after the raw
 /// database load, before anything else has touched it, same as the official AfterDBLoadHook
@@ -112,6 +138,29 @@ public class NoMoreKillZonesHook(
             {
                 logger.Warning(
                     $"NoMoreKillZones: condition {entry.ConditionId} ({entry.Quest}) had no InZone sub-condition to remove - applying the kill-count/text change anyway, but double check this quest still makes sense.");
+            }
+
+            if (entry.MapTargets is { Count: > 0 })
+            {
+                if (condition.Counter?.Conditions is { } counterConditions)
+                {
+                    var alreadyHasLocation = counterConditions.Any(c => c.ConditionType == "Location");
+                    if (!alreadyHasLocation)
+                    {
+                        counterConditions.Add(new QuestConditionCounterCondition
+                        {
+                            Id = new MongoId(),
+                            ConditionType = "Location",
+                            DynamicLocale = false,
+                            Target = new ListOrT<string>(entry.MapTargets, null)
+                        });
+                    }
+                }
+                else
+                {
+                    logger.Warning(
+                        $"NoMoreKillZones: condition {entry.ConditionId} ({entry.Quest}) has no Counter.Conditions to add a map restriction to - this objective may now count kills on any map.");
+                }
             }
 
             if (condition.Value.HasValue)
