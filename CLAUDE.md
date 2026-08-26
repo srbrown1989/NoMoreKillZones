@@ -147,15 +147,34 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
   **Confirmed correct twice over, not the problem**: the server-side write itself — proven via diagnostic
   logging showing the exact right before/after text on every restart.
 
-  **Remaining theory, not yet tested**: text is pinned specifically for quests *already accepted* before this
-  mod changed them, and won't self-correct for this profile's copy of Rite of Passage no matter what's done
-  client-side afterward. The decisive test: check a **not-yet-accepted** quest among the other 30 affected
-  conditions (e.g. Pest Control, Safe Corridor, Illegal Logging, Preemptive Strike — whichever this profile
-  hasn't started) — if a freshly-accepted one shows the corrected text immediately, that confirms it, and the
-  practical takeaway is this mod's text fix reliably applies going forward but not retroactively to
-  already-in-progress saves — a cosmetic-only limitation at that point, since the mechanic itself (the part
-  that actually matters) already works regardless.
-  Also confirmed by this same test: removing a `QuestCondition` outright from an already-accepted quest's list
+  **"Pinned for already-accepted quests" theory retracted — it had no real mechanism behind it, it was just
+  the last theory standing after ruling out the other three by elimination.** The user correctly challenged
+  this on 2026-08-26 ("surely its just grabbing everything to do with a quest through an ID, I wouldnt have
+  thought it would persist the data of the quest based on whether its been accepted") and was right to. Traced
+  it properly through the decompiled client (`C:\Dev\spt-reference\client-dlls\decompiled`) instead:
+  - `dynamicLocale: false` on this condition (confirmed against live `quests.json`) means
+    `EFT.Quests.ConditionCounterCreator.FormattedDescription` resolves via `base.FormattedDescription`, which
+    is `id.ToString().Localized()` → `LocalizationManager.Instance.LocalizedValue(id)` — a live dictionary
+    lookup against `_locales["en"]`, recomputed fresh on every call. **Nothing caches the resolved string on
+    the condition object itself, and `Locale.Merge()` unconditionally overwrites on key collision** (not
+    "fill gaps only") — so the data layer is provably correct and accept-status-blind end to end.
+  - **The real remaining lead**: the quest task-journal UI (`EFT.UI.QuestObjectiveView` /
+    `ObjectiveView<T>`) only re-reads `FormattedDescription` and writes it into the on-screen text field
+    inside `ShowObjective()` — called when that panel is *(re)created*. If the Tasks-screen UI element for an
+    already-open/already-seen quest is pooled (hidden/shown, not destroyed/rebuilt) across raids, you'd see
+    exactly this symptom: correct data everywhere, stale pixels because nothing re-triggered the render call.
+  - **Not yet actually tested**: a full game **client** close-and-relaunch (not just a server restart, and not
+    just returning to the main menu) before reopening Tasks. Every check so far (menu → raid → menu, and a
+    full **server** restart for the 2026-08-26 QuestKeyInfo cross-check below) kept the same client process
+    running the whole time, so this specific theory hasn't been ruled out yet.
+  - **Cross-mod confirmation the symptom is general, not NoMoreKillZones-specific**: QuestKeyInfo (sibling
+    mod, `C:\Dev\QuestKeyInfo`) writes to a completely different locale key (`"<questId> description"`, not a
+    condition ID) via the exact same `LocaleService.GetLocaleDb` mechanism. After a full **server** restart,
+    the user's already-accepted "Golden Swag" quest (server-side data confirmed correct — both required keys
+    present in `quest-keys.json`) still didn't show the appended text. Same symptom, different mod, different
+    locale key, different code path into the same client — strong evidence this is a general "already-open
+    quest doesn't re-render" client behavior, not something specific to this mod's condition-merge logic.
+  Also separately confirmed earlier: removing a `QuestCondition` outright from an already-accepted quest's list
   caused no observed desync — the merge (two objectives -> one, combined count, progress tracked correctly
   through a raid) behaved correctly end to end. It's specifically the string display that's stuck, nothing
   structural.
