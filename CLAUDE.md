@@ -127,20 +127,19 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
 
 ## Known gaps
 
-- **Partially gameplay-verified, 2026-08-27: kill count works, display text doesn't (yet).** User confirmed in a
-  real game session (Rite of Passage, already-accepted quest): the required kill count updated to 15 as
-  expected, but the quest screen still showed the original zone-specific text ("Eliminate Scavs at the old gas
-  station on Customs") instead of the patched text. **The server-side mechanism was re-verified against the
-  real source and checks out**: `/client/locale/{lang}` (`DataCallbacks.cs`) calls `LocaleService.GetLocaleDb`
-  fresh on every request, the exact same singleton dictionary this mod's hook writes to; client-side
-  `Locale.Merge` (`Assembly-CSharp`) overwrites on key collision (server data wins), not the reverse; no
-  file-based client-side locale cache was found in `LocalizationManager`. So the leading theory is some other
-  form of client-side caching not yet identified (possibly scoped to *already-accepted* quests specifically,
-  since this was tested on a quest already active before the mod was installed — worth testing fresh on a
-  *newly*-accepted copy of one of the other 30 affected quests to see if that's the actual variable, not just
-  "client caching" in general). Added targeted diagnostic logging (`locale[id] "before" -> "after"`) to the hook
-  so the next server start's console log gives a definitive yes/no on whether the server-side write itself is
-  happening, rather than continuing to guess. Not resolved yet — this is the top priority to chase down next.
+- **Server-side write confirmed 100% correct, 2026-08-27 — the remaining "text not showing" mystery, if it's
+  still a mystery, is entirely client-side.** First test: kill count updated (10→15) but Rite of Passage's quest
+  screen still showed the original zone-specific text. Added before/after diagnostic logging to settle whether
+  the write was actually happening; a subsequent server restart's console log showed **all 31/31 locale writes
+  succeeding with exactly the right before/after text**, e.g.
+  `locale[675c1f040a1128e59422a876] "Eliminate Scavs at the old gas station on Customs" -> "Eliminate Scavs on
+  Customs"`, and the merge pass also logged correctly (`merged ... combined value 30, text -> "Eliminate Scavs
+  on Customs"`). This rules out the server side entirely — `/client/locale/{lang}` and the locale dictionary
+  itself are provably not the problem. If the client still shows stale text after this, the cause is somewhere
+  client-side (possibly scoped to *already-accepted* quests specifically, since Rite of Passage was active
+  before this mod was installed — worth comparing against a *newly*-accepted copy of one of the other 30
+  affected quests if the symptom recurs). **Awaiting the user's next in-game check** to know whether this is
+  actually resolved now or genuinely needs a client-side investigation.
 - **Two same-map duplicate conditions merged into one**: the same test surfaced that Rite of Passage's two
   Customs conditions (old/new gas station) read awkwardly as two separate "Eliminate Scavs on Customs" lines
   once both lost their zone-specific wording — the user asked for them to combine into a single "Eliminate
