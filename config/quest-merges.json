@@ -1,0 +1,8 @@
+[
+  {
+    "quest": "Rite of Passage",
+    "keepConditionId": "675c1f17cf59d5433be7ae77",
+    "removeConditionId": "675c1f040a1128e59422a876",
+    "newText": "Eliminate Scavs on Customs"
+  }
+]

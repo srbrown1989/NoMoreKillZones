@@ -39,6 +39,27 @@ public record ZoneQuestEntry
     public required string NewText { get; init; }
 }
 
+// One row of config/quest-merges.json - two zone-quests.json entries on the same
+// map, for the same quest, that read better as one combined objective than two
+// separate ones. Runs after the main derestrict pass: removeConditionId's
+// (already-scaled) value is added onto keepConditionId's, removeConditionId is
+// deleted from the quest entirely, and keepConditionId's text is overwritten
+// with newText (superseding whatever the main pass set it to).
+public record QuestMergeEntry
+{
+    [JsonPropertyName("quest")]
+    public string? Quest { get; init; }
+
+    [JsonPropertyName("keepConditionId")]
+    public required string KeepConditionId { get; init; }
+
+    [JsonPropertyName("removeConditionId")]
+    public required string RemoveConditionId { get; init; }
+
+    [JsonPropertyName("newText")]
+    public required string NewText { get; init; }
+}
+
 /// <summary>
 /// Derestricts SPT's zone-locked "kill in this specific sub-area" quest objectives (e.g. Rite of
 /// Passage's "kill Scavs at the old gas station on Customs") to "kill anywhere on the same map" -
@@ -64,6 +85,7 @@ public class NoMoreKillZonesHook(
         var modFolder = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
         var config = LoadConfig(modFolder);
         var entries = LoadZoneQuestEntries(modFolder);
+        var merges = LoadQuestMerges(modFolder);
 
         var localeDb = localeService.GetLocaleDb("en");
         var appliedCount = 0;
@@ -90,13 +112,46 @@ public class NoMoreKillZonesHook(
                 condition.Value = Math.Ceiling(condition.Value.Value * config.KillCountMultiplier);
             }
 
+            // Diagnostic: the in-game text for Rite of Passage was reported as still showing the old
+            // zone-specific wording after this ran (kill count DID update correctly). The server-side
+            // write below and the /client/locale/{lang} route both check out against the real source
+            // (confirmed by reading it, not assumed), so this logs exactly what we read/wrote here to
+            // pin down whether the write itself is the problem or something downstream (most likely
+            // client-side locale caching) is.
+            localeDb.TryGetValue(entry.ConditionId, out var previousText);
             localeDb[entry.ConditionId] = entry.NewText;
+            logger.Info(
+                $"NoMoreKillZones: locale[{entry.ConditionId}] \"{previousText}\" -> \"{entry.NewText}\"");
 
             appliedCount++;
         }
 
+        foreach (var merge in merges)
+        {
+            var keep = FindCondition(merge.KeepConditionId);
+            var remove = FindCondition(merge.RemoveConditionId);
+            if (keep is null || remove is null)
+            {
+                logger.Warning(
+                    $"NoMoreKillZones: merge for {merge.Quest} skipped - keepConditionId or removeConditionId not found (a game/SPT update may have changed this quest).");
+                continue;
+            }
+
+            keep.Value = (keep.Value ?? 0) + (remove.Value ?? 0);
+
+            if (!RemoveCondition(merge.RemoveConditionId))
+            {
+                logger.Warning(
+                    $"NoMoreKillZones: merge for {merge.Quest} - couldn't remove condition {merge.RemoveConditionId} from its quest's condition list (already gone?).");
+            }
+
+            localeDb[merge.KeepConditionId] = merge.NewText;
+            logger.Info(
+                $"NoMoreKillZones: merged {merge.RemoveConditionId} into {merge.KeepConditionId} ({merge.Quest}) - combined value {keep.Value}, text -> \"{merge.NewText}\"");
+        }
+
         logger.Info(
-            $"NoMoreKillZones: derestricted {appliedCount}/{entries.Count} zone-locked kill objectives (kill count x{config.KillCountMultiplier}).");
+            $"NoMoreKillZones: derestricted {appliedCount}/{entries.Count} zone-locked kill objectives (kill count x{config.KillCountMultiplier}), merged {merges.Count} same-map duplicate pair(s).");
 
         return Task.CompletedTask;
     }
@@ -140,6 +195,38 @@ public class NoMoreKillZonesHook(
         return null;
     }
 
+    /// <summary>Same search as FindCondition, but removes the match from whichever status list holds it.</summary>
+    private bool RemoveCondition(string conditionId)
+    {
+        foreach (var quest in templateTable.Quests.Values)
+        {
+            List<QuestCondition>?[] lists =
+            [
+                quest.Conditions.Started,
+                quest.Conditions.AvailableForFinish,
+                quest.Conditions.AvailableForStart,
+                quest.Conditions.Success,
+                quest.Conditions.Fail
+            ];
+
+            foreach (var list in lists)
+            {
+                if (list is null)
+                {
+                    continue;
+                }
+
+                var removed = list.RemoveAll(c => c.Id == conditionId) > 0;
+                if (removed)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private NoMoreKillZonesFileConfig LoadConfig(string modFolder)
     {
         var configPath = IOPath.Combine(modFolder, "config", "config.json");
@@ -178,5 +265,25 @@ public class NoMoreKillZonesHook(
         }
 
         return entries;
+    }
+
+    private List<QuestMergeEntry> LoadQuestMerges(string modFolder)
+    {
+        var mergesPath = IOPath.Combine(modFolder, "config", "quest-merges.json");
+
+        if (!fileUtil.FileExists(mergesPath))
+        {
+            // Not a warning - most installs will have no merges at all, this file is optional.
+            return [];
+        }
+
+        var merges = jsonUtil.Deserialize<List<QuestMergeEntry>>(fileUtil.ReadFile(mergesPath));
+        if (merges is null)
+        {
+            logger.Warning("NoMoreKillZones: quest-merges.json failed to parse - skipping merges.");
+            return [];
+        }
+
+        return merges;
     }
 }

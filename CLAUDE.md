@@ -127,12 +127,35 @@ One file (`NoMoreKillZonesHook.cs`) plus two shipped data files:
 
 ## Known gaps
 
-- **Entirely build-verified, not gameplay-verified at all.** Nothing in this environment can run the actual SPT
-  server. In particular: whether `OnLoadOrder.PostLoad + 1` really runs early enough relative to whatever else
-  touches quest data (the official example uses the same priority for exactly this kind of raw-DB edit, so this
-  is a strong precedent, not a guess, but still unconfirmed by observation); whether the in-game quest screen
-  correctly shows the new text and updated kill count; and whether a raid kill on the now-unrestricted objective
-  actually increments progress as expected. All need a real server start + an in-game check.
+- **Partially gameplay-verified, 2026-08-27: kill count works, display text doesn't (yet).** User confirmed in a
+  real game session (Rite of Passage, already-accepted quest): the required kill count updated to 15 as
+  expected, but the quest screen still showed the original zone-specific text ("Eliminate Scavs at the old gas
+  station on Customs") instead of the patched text. **The server-side mechanism was re-verified against the
+  real source and checks out**: `/client/locale/{lang}` (`DataCallbacks.cs`) calls `LocaleService.GetLocaleDb`
+  fresh on every request, the exact same singleton dictionary this mod's hook writes to; client-side
+  `Locale.Merge` (`Assembly-CSharp`) overwrites on key collision (server data wins), not the reverse; no
+  file-based client-side locale cache was found in `LocalizationManager`. So the leading theory is some other
+  form of client-side caching not yet identified (possibly scoped to *already-accepted* quests specifically,
+  since this was tested on a quest already active before the mod was installed — worth testing fresh on a
+  *newly*-accepted copy of one of the other 30 affected quests to see if that's the actual variable, not just
+  "client caching" in general). Added targeted diagnostic logging (`locale[id] "before" -> "after"`) to the hook
+  so the next server start's console log gives a definitive yes/no on whether the server-side write itself is
+  happening, rather than continuing to guess. Not resolved yet — this is the top priority to chase down next.
+- **Two same-map duplicate conditions merged into one**: the same test surfaced that Rite of Passage's two
+  Customs conditions (old/new gas station) read awkwardly as two separate "Eliminate Scavs on Customs" lines
+  once both lost their zone-specific wording — the user asked for them to combine into a single "Eliminate
+  Scavs on Customs, 0/30" objective instead. New `config/quest-merges.json` + a merge pass in the hook (runs
+  after the main derestrict pass, sums the two already-scaled values, deletes one condition entirely, overwrites
+  the survivor's text) handles this. Checked the other 19 quests for the same same-map-duplicate pattern before
+  assuming Rite of Passage was a one-off — it's the *only* one among the 31 tracked conditions with two
+  conditions on the same map, so this is a single hand-written entry, not a feature that needed to handle many
+  cases. **Entirely unverified in-game** — whether removing a `QuestCondition` object outright from an
+  already-accepted quest's list causes any client-side desync (stale progress reference, UI glitch) for a
+  profile that already had both original conditions is a real open risk, not just a formality, precisely
+  because this profile already has Rite of Passage active from before this change.
+- **Whether `OnLoadOrder.PostLoad + 1` runs early enough relative to whatever else touches quest data** — the
+  official example uses the same priority for exactly this kind of raw-DB edit, a strong precedent, but still
+  not directly confirmed by observation for this specific case.
 - **Only the English locale is patched.** Any other configured server/game language will keep showing the
   original zone-specific text (harmless — still names the right target and map, just also mentions a
   now-irrelevant zone) until someone verifies and adds correct translations for the other 15+ languages this
